@@ -1,19 +1,26 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { AdminNav } from "@/components/AdminNav";
 import { supabase } from "@/lib/supabase";
 
 export function AdminGuard({ children }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [status, setStatus] = useState("loading");
 
   useEffect(() => {
     async function check() {
+      const isAuthRoute = pathname === "/login" || pathname === "/admin/login";
+      if (isAuthRoute) {
+        // Don't run admin guard on the login route itself
+        setStatus("ok");
+        return;
+      }
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
-        router.replace("/login");
+        router.replace("/admin/login");
         return;
       }
       const { data: profile } = await supabase
@@ -29,7 +36,13 @@ export function AdminGuard({ children }) {
       setStatus("ok");
     }
     check();
-  }, [router]);
+  }, [router, pathname]);
+
+  const isAuthRoute = pathname === "/login" || pathname === "/admin/login";
+  if (isAuthRoute) {
+    // Render login page without admin shell
+    return <>{children}</>;
+  }
 
   if (status === "loading") {
     return (

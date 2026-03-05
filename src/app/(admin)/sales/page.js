@@ -9,9 +9,13 @@ import { downloadSalesExcel } from "@/components/salesExcelExport";
 
 export default function AdminSalesPage() {
   const [period, setPeriod] = useState("today");
+  const [paymentFilter, setPaymentFilter] = useState("all");
+  const [orderTypeFilter, setOrderTypeFilter] = useState("all");
   const [orders, setOrders] = useState([]);
   const [topItems, setTopItems] = useState([]);
-  const [summary, setSummary] = useState({ count: 0, total: 0 });
+  const [summary, setSummary] = useState({ count: 0, total: 0, discount: 0 });
+  const [paymentBreakdown, setPaymentBreakdown] = useState({ cash: 0, card: 0, ewallet: 0 });
+  const [orderTypeBreakdown, setOrderTypeBreakdown] = useState({ dine_in: 0, takeout: 0, delivery: 0 });
   const [byCategory, setByCategory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [productSoldModalOpen, setProductSoldModalOpen] = useState(false);
@@ -37,22 +41,38 @@ export default function AdminSalesPage() {
 
       const { data: ordersData } = await supabase
         .from("orders")
-        .select("id, total, created_at, status")
+        .select("id, total, created_at, status, payment_method, order_type, discount_amount")
         .eq("status", "completed")
         .gte("created_at", fromIso)
         .order("created_at", { ascending: false });
-      setOrders(ordersData || []);
+      const filteredOrders = (ordersData || []).filter((o) => {
+        const paymentOk = paymentFilter === "all" || o.payment_method === paymentFilter;
+        const orderTypeOk = orderTypeFilter === "all" || o.order_type === orderTypeFilter;
+        return paymentOk && orderTypeOk;
+      });
+      setOrders(filteredOrders);
 
-      const count = (ordersData || []).length;
-      const total = (ordersData || []).reduce((s, o) => s + Number(o.total), 0);
-      setSummary({ count, total });
+      const count = filteredOrders.length;
+      const total = filteredOrders.reduce((s, o) => s + Number(o.total), 0);
+      const discount = filteredOrders.reduce((s, o) => s + Number(o.discount_amount || 0), 0);
+      setSummary({ count, total, discount });
+      setPaymentBreakdown({
+        cash: filteredOrders.filter((o) => o.payment_method === "cash").length,
+        card: filteredOrders.filter((o) => o.payment_method === "card").length,
+        ewallet: filteredOrders.filter((o) => o.payment_method === "ewallet").length,
+      });
+      setOrderTypeBreakdown({
+        dine_in: filteredOrders.filter((o) => o.order_type === "dine_in").length,
+        takeout: filteredOrders.filter((o) => o.order_type === "takeout").length,
+        delivery: filteredOrders.filter((o) => o.order_type === "delivery").length,
+      });
 
       const [
         { data: itemsData },
         { data: productsData },
         { data: categoriesData },
       ] = await Promise.all([
-        supabase.from("order_items").select("product_id, product_name, quantity, line_total").gte("created_at", fromIso),
+        supabase.from("order_items").select("order_id, product_id, product_name, quantity, line_total").gte("created_at", fromIso),
         supabase.from("products").select("id, category_id"),
         supabase.from("categories").select("id, name").order("sort_order"),
       ]);
@@ -66,9 +86,12 @@ export default function AdminSalesPage() {
         categoryNames[c.id] = c.name;
       });
 
+      const allowedOrderIds = new Set(filteredOrders.map((o) => o.id));
+      const filteredItems = (itemsData || []).filter((row) => allowedOrderIds.has(row.order_id));
+
       const byName = {};
       const categoryMap = {};
-      (itemsData || []).forEach((row) => {
+      filteredItems.forEach((row) => {
         if (!byName[row.product_name]) byName[row.product_name] = { name: row.product_name, quantity: 0, revenue: 0 };
         byName[row.product_name].quantity += row.quantity;
         byName[row.product_name].revenue += Number(row.line_total);
@@ -92,7 +115,7 @@ export default function AdminSalesPage() {
       setLoading(false);
     }
     load();
-  }, [period]);
+  }, [period, paymentFilter, orderTypeFilter]);
 
   useEffect(() => {
     setPageByPeriod((prev) => {
@@ -124,7 +147,7 @@ export default function AdminSalesPage() {
       <p className="mt-1 text-stone-600">View sales and calculate totals by period.</p>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {["today", "week", "month"].map((p) => (
             <button
               key={p}
@@ -135,6 +158,26 @@ export default function AdminSalesPage() {
               {p}
             </button>
           ))}
+          <select
+            value={orderTypeFilter}
+            onChange={(e) => setOrderTypeFilter(e.target.value)}
+            className="rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-700"
+          >
+            <option value="all">All order types</option>
+            <option value="dine_in">Dine-in</option>
+            <option value="takeout">Takeout</option>
+            <option value="delivery">Delivery</option>
+          </select>
+          <select
+            value={paymentFilter}
+            onChange={(e) => setPaymentFilter(e.target.value)}
+            className="rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-700"
+          >
+            <option value="all">All payments</option>
+            <option value="cash">Cash</option>
+            <option value="card">Card</option>
+            <option value="ewallet">E-wallet</option>
+          </select>
         </div>
         {!loading && (
           <div className="relative">
@@ -197,18 +240,43 @@ export default function AdminSalesPage() {
               <h2 className="font-semibold text-stone-800">Sales summary</h2>
               <p className="mt-2 text-3xl font-bold text-amber-700">{summary.count} orders</p>
               <p className="text-2xl font-mono text-stone-700">${summary.total.toFixed(2)} revenue</p>
+              <p className="text-sm text-stone-500">Discounts: ${summary.discount.toFixed(2)}</p>
+              <p className="mt-1 text-sm text-stone-500">
+                Avg ticket: ${summary.count > 0 ? (summary.total / summary.count).toFixed(2) : "0.00"}
+              </p>
             </div>
             <div className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
               <h2 className="font-semibold text-stone-800">Recent orders</h2>
               <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-sm">
                 {orders.slice(0, 10).map((o) => (
-                  <li key={o.id} className="flex justify-between">
+                  <li key={o.id} className="flex justify-between gap-2">
                     <span className="text-stone-600">{new Date(o.created_at).toLocaleString()}</span>
+                    <span className="text-stone-500 capitalize">{(o.order_type || "takeout").replace("_", " ")}</span>
+                    <span className="text-stone-500 uppercase">{o.payment_method || "cash"}</span>
                     <span className="font-mono">${Number(o.total).toFixed(2)}</span>
                   </li>
                 ))}
                 {orders.length === 0 && <li className="text-stone-500">No orders in this period.</li>}
               </ul>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-6 sm:grid-cols-2">
+            <div className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
+              <h2 className="font-semibold text-stone-800">Payment mix</h2>
+              <div className="mt-3 space-y-2 text-sm">
+                <div className="flex items-center justify-between"><span className="text-stone-600">Cash</span><span className="font-medium text-stone-800">{paymentBreakdown.cash}</span></div>
+                <div className="flex items-center justify-between"><span className="text-stone-600">Card</span><span className="font-medium text-stone-800">{paymentBreakdown.card}</span></div>
+                <div className="flex items-center justify-between"><span className="text-stone-600">E-wallet</span><span className="font-medium text-stone-800">{paymentBreakdown.ewallet}</span></div>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
+              <h2 className="font-semibold text-stone-800">Order type mix</h2>
+              <div className="mt-3 space-y-2 text-sm">
+                <div className="flex items-center justify-between"><span className="text-stone-600">Dine-in</span><span className="font-medium text-stone-800">{orderTypeBreakdown.dine_in}</span></div>
+                <div className="flex items-center justify-between"><span className="text-stone-600">Takeout</span><span className="font-medium text-stone-800">{orderTypeBreakdown.takeout}</span></div>
+                <div className="flex items-center justify-between"><span className="text-stone-600">Delivery</span><span className="font-medium text-stone-800">{orderTypeBreakdown.delivery}</span></div>
+              </div>
             </div>
           </div>
 

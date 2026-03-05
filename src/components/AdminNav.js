@@ -13,7 +13,7 @@ export function AdminNav() {
 
   async function handleLogout() {
     await supabase.auth.signOut();
-    router.replace("/login");
+    router.replace("/admin/login");
     router.refresh();
   }
 
@@ -25,15 +25,15 @@ export function AdminNav() {
       </Link>
       <nav className="flex flex-col gap-1">
         <Link
-          href="/inventory"
-          className={pathname === "/inventory" ? `${linkBase} ${linkActive}` : linkBase}
+          href="/admin/inventory"
+          className={pathname === "/admin/inventory" ? `${linkBase} ${linkActive}` : linkBase}
         >
           <Package size={18} className="shrink-0" />
           Inventory
         </Link>
         <Link
-          href="/sales"
-          className={pathname === "/sales" ? `${linkBase} ${linkActive}` : linkBase}
+          href="/admin/sales"
+          className={pathname === "/admin/sales" ? `${linkBase} ${linkActive}` : linkBase}
         >
           <ChartBar size={18} className="shrink-0" />
           Sales
