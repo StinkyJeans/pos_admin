@@ -8,6 +8,7 @@ const nextConfig = {
       { source: "/admin/login", destination: "/login" },
       { source: "/admin/inventory", destination: "/inventory" },
       { source: "/admin/sales", destination: "/sales" },
+      { source: "/admin/audit", destination: "/audit" },
     ];
   },
 };

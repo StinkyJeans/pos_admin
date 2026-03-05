@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Package, ChartBar, Settings, LogOut } from "griddy-icons";
+import { Package, ChartBar, Settings, LogOut, Archive } from "griddy-icons";
 import { supabase } from "@/lib/supabase";
 
 export function AdminNav() {
@@ -37,6 +37,13 @@ export function AdminNav() {
         >
           <ChartBar size={18} className="shrink-0" />
           Sales
+        </Link>
+        <Link
+          href="/admin/audit"
+          className={pathname === "/admin/audit" ? `${linkBase} ${linkActive}` : linkBase}
+        >
+          <Archive size={18} className="shrink-0" />
+          Audit Tracking
         </Link>
       </nav>
       <button

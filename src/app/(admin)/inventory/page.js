@@ -39,7 +39,6 @@ export default function AdminInventoryPage() {
   const [showLowStockModal, setShowLowStockModal] = useState(false);
   const [showDeleteHistory, setShowDeleteHistory] = useState(false);
   const [inactiveProducts, setInactiveProducts] = useState([]);
-  const [adjustmentLogs, setAdjustmentLogs] = useState([]);
   const [passwordModalProcessing, setPasswordModalProcessing] = useState(false);
   const [scrollToProductId, setScrollToProductId] = useState(null);
   const [userRole, setUserRole] = useState("manager");
@@ -60,15 +59,9 @@ export default function AdminInventoryPage() {
       supabase.from("categories").select("*").order("sort_order"),
       supabase.from("products").select("*, categories(name)").eq("is_active", false).order("updated_at", { ascending: false }),
     ]);
-    const { data: adjRes } = await supabase
-      .from("inventory_adjustments")
-      .select("id, product_id, change_type, quantity_before, quantity_change, quantity_after, reason, created_at")
-      .order("created_at", { ascending: false })
-      .limit(20);
     if (prodRes.data) setProducts(prodRes.data);
     if (catRes.data) setCategories(catRes.data);
     if (inactiveRes.data) setInactiveProducts(inactiveRes.data);
-    if (adjRes) setAdjustmentLogs(adjRes);
     const invMap = {};
     (invRes.data || []).forEach((i) => (invMap[i.product_id] = i));
     setInventory(invMap);
@@ -843,47 +836,6 @@ export default function AdminInventoryPage() {
             </div>
           </div>
         )}
-      </div>
-
-      <div className="mt-6 rounded-2xl border border-stone-200 bg-white p-4">
-        <h2 className="font-semibold text-stone-800">Inventory adjustment logs</h2>
-        <p className="mt-1 text-sm text-stone-500">Recent stock changes for audit tracking.</p>
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-stone-200">
-              <tr>
-                <th className="pb-2 font-semibold text-stone-800">Date</th>
-                <th className="pb-2 font-semibold text-stone-800">Product</th>
-                <th className="pb-2 font-semibold text-stone-800">Type</th>
-                <th className="pb-2 font-semibold text-stone-800">Before</th>
-                <th className="pb-2 font-semibold text-stone-800">Change</th>
-                <th className="pb-2 font-semibold text-stone-800">After</th>
-                <th className="pb-2 font-semibold text-stone-800">Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {adjustmentLogs.map((log) => {
-                const product = products.find((p) => p.id === log.product_id);
-                return (
-                  <tr key={log.id} className="border-b border-stone-100">
-                    <td className="py-2 text-stone-600">{new Date(log.created_at).toLocaleString()}</td>
-                    <td className="py-2 font-medium text-stone-800">{product?.name || "Unknown product"}</td>
-                    <td className="py-2 capitalize text-stone-600">{String(log.change_type || "").replace("_", " ")}</td>
-                    <td className="py-2 font-mono text-stone-600">{Number(log.quantity_before).toFixed(2)}</td>
-                    <td className="py-2 font-mono text-stone-700">{Number(log.quantity_change).toFixed(2)}</td>
-                    <td className="py-2 font-mono text-stone-700">{Number(log.quantity_after).toFixed(2)}</td>
-                    <td className="py-2 text-stone-600">{log.reason || "—"}</td>
-                  </tr>
-                );
-              })}
-              {adjustmentLogs.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="py-6 text-center text-stone-500">No adjustment logs yet.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
       </div>
 
       <LowStockItemsModal
