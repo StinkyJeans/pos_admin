@@ -21,14 +21,32 @@ export default function AdminSalesPage() {
   const [productSoldModalOpen, setProductSoldModalOpen] = useState(false);
   const [pageByPeriod, setPageByPeriod] = useState({ today: 1, week: 1, month: 1 });
   const [showDownloadDropdown, setShowDownloadDropdown] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [userRole, setUserRole] = useState("manager");
+  const [orderActionModal, setOrderActionModal] = useState(null);
+  const [orderActionReason, setOrderActionReason] = useState("");
+  const [orderActionPassword, setOrderActionPassword] = useState("");
+  const [orderActionError, setOrderActionError] = useState("");
+  const [orderActionProcessing, setOrderActionProcessing] = useState(false);
 
   const TOP_ITEMS_PER_PAGE = 20;
+  const canVoidRefund = ["admin", "manager"].includes(userRole);
   const currentPage = pageByPeriod[period] ?? 1;
   const topItemsTotalPages = Math.max(1, Math.ceil(topItems.length / TOP_ITEMS_PER_PAGE));
   const paginatedTopItems = topItems.slice(
     (currentPage - 1) * TOP_ITEMS_PER_PAGE,
     currentPage * TOP_ITEMS_PER_PAGE
   );
+
+  useEffect(() => {
+    async function loadRole() {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user?.id) return;
+      const { data: profile } = await supabase.from("profiles").select("role").eq("user_id", user.id).maybeSingle();
+      if (profile?.role) setUserRole(profile.role);
+    }
+    loadRole();
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -41,8 +59,8 @@ export default function AdminSalesPage() {
 
       const { data: ordersData } = await supabase
         .from("orders")
-        .select("id, total, created_at, status, payment_method, order_type, discount_amount")
-        .eq("status", "completed")
+        .select("id, total, created_at, status, payment_method, order_type, discount_amount, void_reason, refund_reason")
+        .in("status", ["completed", "refunded", "voided"])
         .gte("created_at", fromIso)
         .order("created_at", { ascending: false });
       const filteredOrders = (ordersData || []).filter((o) => {
@@ -52,19 +70,20 @@ export default function AdminSalesPage() {
       });
       setOrders(filteredOrders);
 
-      const count = filteredOrders.length;
-      const total = filteredOrders.reduce((s, o) => s + Number(o.total), 0);
-      const discount = filteredOrders.reduce((s, o) => s + Number(o.discount_amount || 0), 0);
+      const completedOrders = filteredOrders.filter((o) => o.status === "completed");
+      const count = completedOrders.length;
+      const total = completedOrders.reduce((s, o) => s + Number(o.total), 0);
+      const discount = completedOrders.reduce((s, o) => s + Number(o.discount_amount || 0), 0);
       setSummary({ count, total, discount });
       setPaymentBreakdown({
-        cash: filteredOrders.filter((o) => o.payment_method === "cash").length,
-        card: filteredOrders.filter((o) => o.payment_method === "card").length,
-        ewallet: filteredOrders.filter((o) => o.payment_method === "ewallet").length,
+        cash: completedOrders.filter((o) => o.payment_method === "cash").length,
+        card: completedOrders.filter((o) => o.payment_method === "card").length,
+        ewallet: completedOrders.filter((o) => o.payment_method === "ewallet").length,
       });
       setOrderTypeBreakdown({
-        dine_in: filteredOrders.filter((o) => o.order_type === "dine_in").length,
-        takeout: filteredOrders.filter((o) => o.order_type === "takeout").length,
-        delivery: filteredOrders.filter((o) => o.order_type === "delivery").length,
+        dine_in: completedOrders.filter((o) => o.order_type === "dine_in").length,
+        takeout: completedOrders.filter((o) => o.order_type === "takeout").length,
+        delivery: completedOrders.filter((o) => o.order_type === "delivery").length,
       });
 
       const [
@@ -86,7 +105,7 @@ export default function AdminSalesPage() {
         categoryNames[c.id] = c.name;
       });
 
-      const allowedOrderIds = new Set(filteredOrders.map((o) => o.id));
+      const allowedOrderIds = new Set(completedOrders.map((o) => o.id));
       const filteredItems = (itemsData || []).filter((row) => allowedOrderIds.has(row.order_id));
 
       const byName = {};
@@ -115,7 +134,7 @@ export default function AdminSalesPage() {
       setLoading(false);
     }
     load();
-  }, [period, paymentFilter, orderTypeFilter]);
+  }, [period, paymentFilter, orderTypeFilter, reloadKey]);
 
   useEffect(() => {
     setPageByPeriod((prev) => {
@@ -128,21 +147,111 @@ export default function AdminSalesPage() {
 
   const chartData = useMemo(() => {
     const byDate = {};
-    orders.forEach((o) => {
+    orders
+      .filter((o) => o.status !== "voided")
+      .forEach((o) => {
       const d = new Date(o.created_at);
       const key = d.toISOString().slice(0, 10);
       if (!byDate[key]) byDate[key] = { date: key, label: d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }), revenue: 0, orders: 0 };
       byDate[key].revenue += Number(o.total);
       byDate[key].orders += 1;
-    });
+      });
     return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
   }, [orders]);
+
+  async function restockOrderItems(orderId, reason, changeType) {
+    const { data: authData } = await supabase.auth.getUser();
+    const actorUserId = authData?.user?.id ?? null;
+    const { data: items } = await supabase
+      .from("order_items")
+      .select("product_id, quantity, product_name")
+      .eq("order_id", orderId);
+    for (const it of items || []) {
+      const { data: inv } = await supabase.from("inventory").select("quantity").eq("product_id", it.product_id).maybeSingle();
+      const before = Number(inv?.quantity ?? 0);
+      const change = Math.abs(Number(it.quantity || 0));
+      const after = before + change;
+      await supabase.from("inventory").upsert(
+        { product_id: it.product_id, quantity: after, low_stock_threshold: 50, updated_at: new Date().toISOString() },
+        { onConflict: "product_id" }
+      );
+      await supabase.from("inventory_adjustments").insert({
+        product_id: it.product_id,
+        order_id: orderId,
+        actor_user_id: actorUserId,
+        change_type: changeType,
+        quantity_before: before,
+        quantity_change: change,
+        quantity_after: after,
+        reason,
+        metadata: { product_name: it.product_name },
+      });
+    }
+  }
+
+  async function handleConfirmOrderAction() {
+    if (!orderActionModal?.order) return;
+    if (!orderActionReason.trim()) {
+      setOrderActionError("Reason is required.");
+      return;
+    }
+    if (!orderActionPassword.trim()) {
+      setOrderActionError("Admin/manager password is required.");
+      return;
+    }
+    setOrderActionError("");
+    setOrderActionProcessing(true);
+    try {
+      const order = orderActionModal.order;
+      const { data: userResp } = await supabase.auth.getUser();
+      const user = userResp?.user;
+      if (!user?.email) {
+        setOrderActionError("Could not validate current user.");
+        return;
+      }
+      const { error: passErr } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: orderActionPassword.trim(),
+      });
+      if (passErr) {
+        setOrderActionError("Incorrect password.");
+        return;
+      }
+      if (orderActionModal.type === "void") {
+        await restockOrderItems(order.id, orderActionReason.trim(), "void");
+        await supabase
+          .from("orders")
+          .update({ status: "voided", void_reason: orderActionReason.trim() })
+          .eq("id", order.id);
+      } else if (orderActionModal.type === "refund") {
+        const { data: authData } = await supabase.auth.getUser();
+        await restockOrderItems(order.id, orderActionReason.trim(), "refund");
+        await supabase
+          .from("orders")
+          .update({
+            status: "refunded",
+            refund_reason: orderActionReason.trim(),
+            refunded_at: new Date().toISOString(),
+            refunded_by: authData?.user?.id ?? null,
+          })
+          .eq("id", order.id);
+      }
+      setOrderActionModal(null);
+      setOrderActionReason("");
+      setOrderActionPassword("");
+      setOrderActionError("");
+      setReloadKey((k) => k + 1);
+    } finally {
+      setOrderActionProcessing(false);
+    }
+  }
 
   return (
     <div>
       <div className="flex items-center gap-2">
         <ChartBar size={28} className="text-stone-700" />
         <h1 className="text-2xl font-bold text-stone-800">Sales</h1>
+        <span className="rounded bg-stone-100 px-2 py-0.5 text-xs font-medium uppercase text-stone-700">{userRole}</span>
       </div>
       <p className="mt-1 text-stone-600">View sales and calculate totals by period.</p>
 
@@ -247,13 +356,52 @@ export default function AdminSalesPage() {
             </div>
             <div className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
               <h2 className="font-semibold text-stone-800">Recent orders</h2>
-              <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-sm">
+              <ul className="mt-2 max-h-72 space-y-2 overflow-y-auto text-sm">
                 {orders.slice(0, 10).map((o) => (
-                  <li key={o.id} className="flex justify-between gap-2">
-                    <span className="text-stone-600">{new Date(o.created_at).toLocaleString()}</span>
-                    <span className="text-stone-500 capitalize">{(o.order_type || "takeout").replace("_", " ")}</span>
-                    <span className="text-stone-500 uppercase">{o.payment_method || "cash"}</span>
-                    <span className="font-mono">${Number(o.total).toFixed(2)}</span>
+                  <li key={o.id} className="rounded border border-stone-100 p-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-stone-600">{new Date(o.created_at).toLocaleString()}</span>
+                      <span className="text-stone-500 capitalize">{(o.order_type || "takeout").replace("_", " ")}</span>
+                      <span className="text-stone-500 uppercase">{o.payment_method || "cash"}</span>
+                      <span className={`rounded px-2 py-0.5 text-xs font-medium ${o.status === "completed" ? "bg-green-100 text-green-800" : o.status === "voided" ? "bg-red-100 text-red-800" : "bg-amber-100 text-amber-800"}`}>
+                        {o.status}
+                      </span>
+                      <span className="font-mono">${Number(o.total).toFixed(2)}</span>
+                    </div>
+                    {canVoidRefund && o.status === "completed" && (
+                      <div className="mt-2 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOrderActionModal({ type: "void", order: o });
+                            setOrderActionReason("");
+                            setOrderActionPassword("");
+                            setOrderActionError("");
+                          }}
+                          className="rounded bg-red-100 px-2 py-1 text-xs font-medium text-red-800 hover:bg-red-200"
+                        >
+                          Void
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOrderActionModal({ type: "refund", order: o });
+                            setOrderActionReason("");
+                            setOrderActionPassword("");
+                            setOrderActionError("");
+                          }}
+                          className="rounded bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800 hover:bg-amber-200"
+                        >
+                          Refund
+                        </button>
+                      </div>
+                    )}
+                    {o.status === "voided" && o.void_reason && (
+                      <p className="mt-1 text-xs text-red-700">Reason: {o.void_reason}</p>
+                    )}
+                    {o.status === "refunded" && o.refund_reason && (
+                      <p className="mt-1 text-xs text-amber-700">Reason: {o.refund_reason}</p>
+                    )}
                   </li>
                 ))}
                 {orders.length === 0 && <li className="text-stone-500">No orders in this period.</li>}
@@ -361,6 +509,57 @@ export default function AdminSalesPage() {
               )}
             </div>
           </div>
+          {orderActionModal && (
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-stone-900/50 p-4">
+              <div className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-5 shadow-xl">
+                <h3 className="font-semibold text-stone-800">
+                  {orderActionModal.type === "void" ? "Void order" : "Refund order"}
+                </h3>
+                <p className="mt-1 text-sm text-stone-600">
+                  Provide a reason to {orderActionModal.type} order #{orderActionModal.order.id.slice(0, 8)}.
+                </p>
+                <textarea
+                  value={orderActionReason}
+                  onChange={(e) => setOrderActionReason(e.target.value)}
+                  rows={3}
+                  placeholder="Reason"
+                  className="mt-3 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                />
+                <input
+                  type="password"
+                  value={orderActionPassword}
+                  onChange={(e) => setOrderActionPassword(e.target.value)}
+                  placeholder="Confirm password"
+                  autoComplete="current-password"
+                  className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                />
+                {orderActionError && <p className="mt-2 text-sm text-red-600">{orderActionError}</p>}
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOrderActionModal(null);
+                      setOrderActionReason("");
+                      setOrderActionPassword("");
+                      setOrderActionError("");
+                    }}
+                    className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
+                    disabled={orderActionProcessing}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmOrderAction}
+                    className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                    disabled={orderActionProcessing}
+                  >
+                    {orderActionProcessing ? "Processing…" : "Confirm"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>

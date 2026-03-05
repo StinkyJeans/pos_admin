@@ -28,9 +28,9 @@ export default function AdminLoginPage() {
         .select("role")
         .eq("user_id", authData.user.id)
         .single();
-      if (!profile || profile.role !== "admin") {
+      if (!profile || !["admin", "manager"].includes(profile.role)) {
         await supabase.auth.signOut();
-        setError("This account does not have admin access.");
+        setError("This account does not have admin/manager access.");
         setLoading(false);
         return;
       }

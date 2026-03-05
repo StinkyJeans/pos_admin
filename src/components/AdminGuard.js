@@ -28,7 +28,7 @@ export function AdminGuard({ children }) {
         .select("role")
         .eq("user_id", session.user.id)
         .single();
-      if (!profile || profile.role !== "admin") {
+      if (!profile || !["admin", "manager"].includes(profile.role)) {
         await supabase.auth.signOut();
         setStatus("denied");
         return;
@@ -55,7 +55,7 @@ export function AdminGuard({ children }) {
   if (status === "denied") {
     return (
       <div className="flex min-h-screen items-center justify-center">
-        <p className="text-red-600">Access denied. This account is not an admin.</p>
+        <p className="text-red-600">Access denied. This account is not an admin or manager.</p>
       </div>
     );
   }

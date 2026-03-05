@@ -39,23 +39,36 @@ export default function AdminInventoryPage() {
   const [showLowStockModal, setShowLowStockModal] = useState(false);
   const [showDeleteHistory, setShowDeleteHistory] = useState(false);
   const [inactiveProducts, setInactiveProducts] = useState([]);
+  const [adjustmentLogs, setAdjustmentLogs] = useState([]);
   const [passwordModalProcessing, setPasswordModalProcessing] = useState(false);
   const [scrollToProductId, setScrollToProductId] = useState(null);
+  const [userRole, setUserRole] = useState("manager");
 
   const PER_PAGE = 50;
   const totalPages = Math.max(1, Math.ceil(products.length / PER_PAGE));
   const paginatedProducts = products.slice((page - 1) * PER_PAGE, page * PER_PAGE);
 
   async function load() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user?.id) {
+      const { data: profile } = await supabase.from("profiles").select("role").eq("user_id", user.id).maybeSingle();
+      setUserRole(profile?.role || "manager");
+    }
     const [prodRes, invRes, catRes, inactiveRes] = await Promise.all([
       supabase.from("products").select("*, categories(name)").eq("is_active", true).order("name"),
       supabase.from("inventory").select("*"),
       supabase.from("categories").select("*").order("sort_order"),
       supabase.from("products").select("*, categories(name)").eq("is_active", false).order("updated_at", { ascending: false }),
     ]);
+    const { data: adjRes } = await supabase
+      .from("inventory_adjustments")
+      .select("id, product_id, change_type, quantity_before, quantity_change, quantity_after, reason, created_at")
+      .order("created_at", { ascending: false })
+      .limit(20);
     if (prodRes.data) setProducts(prodRes.data);
     if (catRes.data) setCategories(catRes.data);
     if (inactiveRes.data) setInactiveProducts(inactiveRes.data);
+    if (adjRes) setAdjustmentLogs(adjRes);
     const invMap = {};
     (invRes.data || []).forEach((i) => (invMap[i.product_id] = i));
     setInventory(invMap);
@@ -138,8 +151,9 @@ export default function AdminInventoryPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  async function saveInventory(productId, quantity) {
+  async function saveInventory(productId, quantity, reason = "Manual inventory edit") {
     const qty = parseFloat(quantity) ?? 0;
+    const prevQty = Number(getInv(productId)?.quantity ?? 0);
     const { error } = await supabase.from("inventory").upsert(
       {
         product_id: productId,
@@ -152,6 +166,18 @@ export default function AdminInventoryPage() {
     if (error) {
       console.error("Inventory save failed:", error?.message ?? error);
       return error?.message ?? "Failed to update inventory.";
+    }
+    if (qty !== prevQty) {
+      const { data: auth } = await supabase.auth.getUser();
+      await supabase.from("inventory_adjustments").insert({
+        product_id: productId,
+        actor_user_id: auth?.user?.id ?? null,
+        change_type: "manual_adjustment",
+        quantity_before: prevQty,
+        quantity_change: qty - prevQty,
+        quantity_after: qty,
+        reason,
+      });
     }
     setInventory((prev) => ({
       ...prev,
@@ -179,7 +205,7 @@ export default function AdminInventoryPage() {
 
   async function handleSaveEdit(p) {
     clearAllMessages();
-    const invError = await saveInventory(p.id, editQty);
+    const invError = await saveInventory(p.id, editQty, "Manual table edit");
     if (invError) {
       setEditMessage({ type: "error", text: invError });
       return;
@@ -215,7 +241,7 @@ export default function AdminInventoryPage() {
   async function handleSaveLookupEdit() {
     if (!lookupResult) return;
     clearAllMessages();
-    const invError = await saveInventory(lookupResult.id, lookupEditQty);
+    const invError = await saveInventory(lookupResult.id, lookupEditQty, "Lookup card edit");
     if (invError) {
       setEditMessage({ type: "error", text: invError });
       return;
@@ -239,6 +265,16 @@ export default function AdminInventoryPage() {
   }
 
   function openPasswordModal(action, product, from = "table") {
+    if ((action === "delete" || action === "deletePermanent" || action === "restore") && !canManageCatalog) {
+      setEditMessage({ type: "error", text: "Only admin can delete or restore products." });
+      setTimeout(() => setEditMessage(null), 3000);
+      return;
+    }
+    if ((action === "edit" || action === "lowStockEdit") && !canEditStockPrice) {
+      setEditMessage({ type: "error", text: "You do not have permission to edit inventory." });
+      setTimeout(() => setEditMessage(null), 3000);
+      return;
+    }
     clearAllMessages();
     setPasswordModal({ action, product, from });
     setConfirmPassword("");
@@ -352,6 +388,10 @@ export default function AdminInventoryPage() {
   }
 
   async function addCategory() {
+    if (!canManageCatalog) {
+      setCategoryMessage({ type: "error", text: "Only admin can add categories." });
+      return;
+    }
     if (!newCategoryName.trim()) return;
     clearAllMessages();
     const { error } = await supabase.from("categories").insert({ name: newCategoryName.trim(), sort_order: categories.length + 1 });
@@ -368,6 +408,10 @@ export default function AdminInventoryPage() {
   }
 
   async function addProduct() {
+    if (!canManageCatalog) {
+      setProductMessage({ type: "error", text: "Only admin can add products." });
+      return;
+    }
     if (!newProduct.name?.trim()) return;
     if (!newProduct.barcode?.trim()) {
       setProductMessage({ type: "error", text: "Barcode is required for scanning at POS." });
@@ -402,6 +446,16 @@ export default function AdminInventoryPage() {
       setTimeout(() => setProductMessage(null), 5000);
       return;
     }
+    const { data: auth } = await supabase.auth.getUser();
+    await supabase.from("inventory_adjustments").insert({
+      product_id: product.id,
+      actor_user_id: auth?.user?.id ?? null,
+      change_type: "stock_in",
+      quantity_before: 0,
+      quantity_change: initQty,
+      quantity_after: initQty,
+      reason: "Initial stock on product creation",
+    });
     setNewProduct({ name: "", barcode: "", price: "", cost: "", category_id: "", quantity: "0", low_stock_threshold: String(DEFAULT_LOW_STOCK_THRESHOLD) });
     setShowAddProduct(false);
     setLookupError("");
@@ -415,6 +469,8 @@ export default function AdminInventoryPage() {
     return inv && Number(inv.quantity) <= Number(inv.low_stock_threshold ?? DEFAULT_LOW_STOCK_THRESHOLD);
   });
   const lowStockCount = lowStockProducts.length;
+  const canEditStockPrice = ["admin", "manager"].includes(userRole);
+  const canManageCatalog = userRole === "admin";
 
   function goToProductRow(productId) {
     const index = products.findIndex((p) => p.id === productId);
@@ -428,6 +484,11 @@ export default function AdminInventoryPage() {
   function handleLowStockEdit(productId) {
     const p = products.find((x) => x.id === productId);
     if (!p) return;
+    if (!canEditStockPrice) {
+      setEditMessage({ type: "error", text: "You do not have permission to edit inventory." });
+      setTimeout(() => setEditMessage(null), 3000);
+      return;
+    }
     openPasswordModal("lowStockEdit", p, "lowStock");
   }
 
@@ -503,6 +564,7 @@ export default function AdminInventoryPage() {
       <div className="flex items-center gap-2">
         <Package size={28} className="text-stone-700" />
         <h1 className="text-2xl font-bold text-stone-800">Inventory</h1>
+        <span className="rounded bg-stone-100 px-2 py-0.5 text-xs font-medium uppercase text-stone-700">{userRole}</span>
       </div>
       <p className="mt-1 text-stone-600">Search by barcode or product name. Results update as you type.</p>
 
@@ -584,13 +646,15 @@ export default function AdminInventoryPage() {
                   </button>
                 </>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => openPasswordModal("edit", lookupResult, "lookup")}
-                  className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
-                >
-                  Edit stock / price
-                </button>
+                canEditStockPrice && (
+                  <button
+                    type="button"
+                    onClick={() => openPasswordModal("edit", lookupResult, "lookup")}
+                    className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+                  >
+                    Edit stock / price
+                  </button>
+                )
               )}
             </div>
           </div>
@@ -599,21 +663,23 @@ export default function AdminInventoryPage() {
 
       <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-2">
-<button type="button" onClick={() => { clearAllMessages(); setShowAddCategory(!showAddCategory); }} className="rounded-xl border border-stone-300 px-4 py-2 font-medium text-stone-700 hover:bg-stone-100">
+<button type="button" onClick={() => { clearAllMessages(); setShowAddCategory(!showAddCategory); }} disabled={!canManageCatalog} className="rounded-xl border border-stone-300 px-4 py-2 font-medium text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50">
           {showAddCategory ? "Cancel" : "+ Category"}
         </button>
-        <button type="button" onClick={() => { clearAllMessages(); setShowAddProduct(!showAddProduct); }} className="rounded-xl bg-amber-500 px-4 py-2 font-medium text-white hover:bg-amber-600">
+        <button type="button" onClick={() => { clearAllMessages(); setShowAddProduct(!showAddProduct); }} disabled={!canManageCatalog} className="rounded-xl bg-amber-500 px-4 py-2 font-medium text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50">
           {showAddProduct ? "Cancel" : "+ Add product"}
         </button>
         </div>
-        <button
-          type="button"
-          onClick={() => { clearAllMessages(); setShowDeleteHistory(true); }}
-          className="flex items-center gap-2 rounded-xl border border-stone-300 px-4 py-2 font-medium text-stone-700 hover:bg-stone-100"
-        >
-          <Archive size={20} />
-          Delete history ({inactiveProducts.length})
-        </button>
+        {canManageCatalog && (
+          <button
+            type="button"
+            onClick={() => { clearAllMessages(); setShowDeleteHistory(true); }}
+            className="flex items-center gap-2 rounded-xl border border-stone-300 px-4 py-2 font-medium text-stone-700 hover:bg-stone-100"
+          >
+            <Archive size={20} />
+            Delete history ({inactiveProducts.length})
+          </button>
+        )}
       </div>
 
       {showAddCategory && (
@@ -732,8 +798,12 @@ export default function AdminInventoryPage() {
                       </div>
                     ) : (
                       <div className="flex gap-2">
-                        <button type="button" onClick={() => openPasswordModal("edit", p)} className="rounded bg-amber-100 p-1.5 text-amber-800 hover:bg-amber-200" aria-label="Edit"><Edit size={16} /></button>
-                        <button type="button" onClick={() => openPasswordModal("delete", p)} className="rounded bg-red-100 p-1.5 text-red-800 hover:bg-red-200" aria-label="Delete"><Trash size={16} /></button>
+                        {canEditStockPrice && (
+                          <button type="button" onClick={() => openPasswordModal("edit", p)} className="rounded bg-amber-100 p-1.5 text-amber-800 hover:bg-amber-200" aria-label="Edit"><Edit size={16} /></button>
+                        )}
+                        {canManageCatalog && (
+                          <button type="button" onClick={() => openPasswordModal("delete", p)} className="rounded bg-red-100 p-1.5 text-red-800 hover:bg-red-200" aria-label="Delete"><Trash size={16} /></button>
+                        )}
                       </div>
                     )}
                   </td>
@@ -775,6 +845,47 @@ export default function AdminInventoryPage() {
         )}
       </div>
 
+      <div className="mt-6 rounded-2xl border border-stone-200 bg-white p-4">
+        <h2 className="font-semibold text-stone-800">Inventory adjustment logs</h2>
+        <p className="mt-1 text-sm text-stone-500">Recent stock changes for audit tracking.</p>
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-stone-200">
+              <tr>
+                <th className="pb-2 font-semibold text-stone-800">Date</th>
+                <th className="pb-2 font-semibold text-stone-800">Product</th>
+                <th className="pb-2 font-semibold text-stone-800">Type</th>
+                <th className="pb-2 font-semibold text-stone-800">Before</th>
+                <th className="pb-2 font-semibold text-stone-800">Change</th>
+                <th className="pb-2 font-semibold text-stone-800">After</th>
+                <th className="pb-2 font-semibold text-stone-800">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {adjustmentLogs.map((log) => {
+                const product = products.find((p) => p.id === log.product_id);
+                return (
+                  <tr key={log.id} className="border-b border-stone-100">
+                    <td className="py-2 text-stone-600">{new Date(log.created_at).toLocaleString()}</td>
+                    <td className="py-2 font-medium text-stone-800">{product?.name || "Unknown product"}</td>
+                    <td className="py-2 capitalize text-stone-600">{String(log.change_type || "").replace("_", " ")}</td>
+                    <td className="py-2 font-mono text-stone-600">{Number(log.quantity_before).toFixed(2)}</td>
+                    <td className="py-2 font-mono text-stone-700">{Number(log.quantity_change).toFixed(2)}</td>
+                    <td className="py-2 font-mono text-stone-700">{Number(log.quantity_after).toFixed(2)}</td>
+                    <td className="py-2 text-stone-600">{log.reason || "—"}</td>
+                  </tr>
+                );
+              })}
+              {adjustmentLogs.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="py-6 text-center text-stone-500">No adjustment logs yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <LowStockItemsModal
         open={showLowStockModal && lowStockCount > 0}
         onClose={() => {
@@ -798,7 +909,7 @@ export default function AdminInventoryPage() {
         onChangeQty={setLowStockEditQty}
         onSaveEdit={async (productId) => {
           clearAllMessages();
-          const invError = await saveInventory(productId, lowStockEditQty);
+          const invError = await saveInventory(productId, lowStockEditQty, "Low stock modal edit");
           if (invError) {
             setEditMessage({ type: "error", text: invError });
             return;
